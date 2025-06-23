@@ -1,3 +1,4 @@
+import os  # Add this import at the top
 from collections.abc import Awaitable
 from typing import Any, AsyncGenerator, List, Optional, Union, cast
 
@@ -27,19 +28,16 @@ class ChatReadRetrieveReadApproach(ChatApproach):
 
     def __init__(
         self,
-        *,
         search_client: SearchClient,
         search_index_name: str,
-        cosmic_index_name: str = None,  # Add domain-specific index names
-        substrate_index_name: str = None,
         agent_model: Optional[str],
         agent_deployment: Optional[str],
         agent_client: Optional[KnowledgeAgentRetrievalClient],
-        auth_helper: AuthenticationHelper,
         openai_client: AsyncOpenAI,
+        auth_helper: AuthenticationHelper,
         chatgpt_model: str,
-        chatgpt_deployment: Optional[str],  # Not needed for non-Azure OpenAI
-        embedding_deployment: Optional[str],  # Not needed for non-Azure OpenAI or for retrieval_mode="text"
+        chatgpt_deployment: Optional[str],
+        embedding_deployment: Optional[str],
         embedding_model: str,
         embedding_dimensions: int,
         embedding_field: str,
@@ -49,7 +47,7 @@ class ChatReadRetrieveReadApproach(ChatApproach):
         query_speller: str,
         prompt_manager: PromptManager,
         reasoning_effort: Optional[str] = None,
-        domain_classifier: Optional[Any] = None,  # Add this parameter
+        domain_classifier: Optional[Any] = None,
         openai_host: str = "",
         vision_endpoint: str = "",
         vision_token_provider: Optional[Any] = None,
@@ -74,8 +72,6 @@ class ChatReadRetrieveReadApproach(ChatApproach):
         
         # Set additional attributes specific to this class
         self.search_index_name = search_index_name  # Store it as instance variable
-        self.cosmic_index_name = cosmic_index_name or search_index_name
-        self.substrate_index_name = substrate_index_name or search_index_name
         self.chatgpt_model = chatgpt_model
         self.chatgpt_deployment = chatgpt_deployment
         self.sourcepage_field = sourcepage_field
@@ -88,6 +84,10 @@ class ChatReadRetrieveReadApproach(ChatApproach):
         self.answer_prompt = prompt_manager.load_prompt("chat_answer_question.prompty")
         self.include_token_usage = True
         self.domain_classifier = domain_classifier
+
+        # Add missing index names for agentic retrieval
+        self.cosmic_index_name = os.getenv("AZURE_SEARCH_COSMIC_INDEX", "cosmic-index")
+        self.substrate_index_name = os.getenv("AZURE_SEARCH_SUBSTRATE_INDEX", "substrate-index")
 
     async def run_until_final_call(
         self,
@@ -113,7 +113,10 @@ class ChatReadRetrieveReadApproach(ChatApproach):
                 original_user_query, 
                 history
             )
-            
+            print("🔍 Domain Classification Result:")
+            print(f"   Domains: {domains}")
+            print(f"   Confidence: {confidence:.1%}")
+            print(f"   Reasoning: {reasoning}")
             domain_message = self._format_domain_message(domains, confidence, reasoning)
             domain_info = {
                 "domains": domains,
@@ -124,6 +127,11 @@ class ChatReadRetrieveReadApproach(ChatApproach):
             
             # Store domain info in overrides so search approaches can use it
             overrides["domain_classification"] = domain_info
+            
+            print(f"🎯 Domain Classification Result:")
+            print(f"   Domains: {domains}")
+            print(f"   Domain count: {len(domains)}")
+            print(f"   Message: {domain_message[:100]}...")
 
         reasoning_model_support = self.GPT_REASONING_MODELS.get(self.chatgpt_model)
         if reasoning_model_support and (not reasoning_model_support.streaming and should_stream):
@@ -136,67 +144,135 @@ class ChatReadRetrieveReadApproach(ChatApproach):
         else:
             extra_info = await self.run_search_approach(messages, overrides, auth_claims)
 
-        # Modify the prompt to include domain context
-        prompt_variables = self.get_system_prompt_variables(overrides.get("prompt_template")) | {
+        # Get base prompt variables
+        base_prompt_vars = self.get_system_prompt_variables(overrides.get("prompt_template"))
+        
+        # Check if override_prompt exists
+        if "override_prompt" in base_prompt_vars and base_prompt_vars["override_prompt"]:
+            print(f"⚠️ WARNING: override_prompt is set, domain formatting may not work")
+
+        # Build prompt variables
+        prompt_variables = base_prompt_vars | {
             "include_follow_up_questions": bool(overrides.get("suggest_followup_questions")),
             "past_messages": messages[:-1],
             "user_query": original_user_query,
             "text_sources": extra_info.data_points.text,
+            "injected_prompt": base_prompt_vars.get("injected_prompt", ""),
+            "override_prompt": base_prompt_vars.get("override_prompt", ""),
         }
         
-        # Add domain-specific variables
-        if domain_message:
-            prompt_variables["domain_prefix"] = domain_message + "\n\n"
-        else:
-            prompt_variables["domain_prefix"] = ""
-        
-        # If domain is ambiguous, add context for structured response
-        if domain_info and len(domain_info["domains"]) > 1:
-            # Make the domain context more explicit and forceful
+        # ALWAYS set domain variables (even if empty)
+        prompt_variables["domain_prefix"] = ""
+        prompt_variables["domain_context"] = ""
+        print("domain info before adding to prompt variables:")
+        print(f"Domain info: {domain_info}")
+        # Add domain-specific variables if available
+        if domain_info:
+            # Set domain prefix (classification message)
+            if domain_message:
+                prompt_variables["domain_prefix"] = domain_message
+                print(f"✅ Set domain_prefix: {domain_message[:50]}...")
+            
+            # Set domain context for multi-domain responses OR medium confidence (confusion category)
             domains_list = domain_info["domains"]
-            domain_context = (
-                f"The user's question relates to multiple domains: {', '.join(domains_list)}. "
-                f"YOU MUST structure your answer by domain with CLEAR separation. "
-                f"Use the EXACT format below:\n\n"
+            confidence = domain_info["confidence"]
+            
+            # Treat as multi-domain if: 
+            # 1. Actually multiple domains, OR 
+            # 2. Medium confidence (0.5-0.7) indicating confusion/ambiguity
+            should_use_multi_domain = (
+                len(domains_list) > 1 or 
+                (0.5 <= confidence <= 0.7)
             )
             
-            # Add explicit format for each domain
-            for domain in domains_list:
-                domain_context += f"### Under {domain}:\n\n"
-                domain_context += f"(All information related to {domain} from {domain}-tagged sources)\n\n"
-            
-            domain_context += (
-                "CRITICAL: You MUST use these exact headings. "
-                "Each domain section MUST be clearly separated with the ### heading. "
-                "Do NOT mix information from different domains in the same section."
-            )
-            
-            prompt_variables["domain_context"] = domain_context
-        else:
-            prompt_variables["domain_context"] = ""
-
-        # Debug: Print what variables are being passed
-        print(f"🔧 Prompt variables being passed:")
-        print(f"  domain_prefix: {repr(prompt_variables.get('domain_prefix', '')[:100])}")
-        print(f"  domain_context: {repr(prompt_variables.get('domain_context', ''))}")
-        print(f"  Number of text_sources: {len(prompt_variables.get('text_sources', []))}")
+            if should_use_multi_domain:
+                print(f"🔀 Triggering multi-domain formatting:")
+                print(f"   Reason: {'Multiple domains' if len(domains_list) > 1 else 'Medium confidence (confusion category)'}")
+                print(f"   Domains: {domains_list}")
+                print(f"   Confidence: {confidence}")
+                
+                # For medium confidence with single domain, add both domains for comparison
+                if len(domains_list) == 1 and 0.5 <= confidence <= 0.7:
+                    # Add the "other" domain for comparison since we're uncertain
+                    if "Cosmic" in domains_list:
+                        domains_list = ["Cosmic", "Substrate"]
+                    elif "Substrate" in domains_list:
+                        domains_list = ["Cosmic", "Substrate"]
+                    print(f"   Expanded domains for confusion category: {domains_list}")
+                
+                # Build explicit formatting instructions with better separation
+                domain_sections = []
+                for domain in domains_list:
+                    if domain == "Cosmic":
+                        domain_sections.append("### Cosmic:\n\n[All Cosmic-related information from sources tagged with 'Domain: Cosmic']\n\n[Include citations [source.docx] for each fact]")
+                    elif domain == "Substrate":
+                        domain_sections.append("### Substrate:\n\n[All Exchange/Substrate information from sources tagged with 'Domain: Substrate']\n\n[Include citations [source.docx] for each fact]")
+                    else:
+                        domain_sections.append(f"### {domain}:\n\n[All {domain}-related information]\n\n[Include citations [source.docx] for each fact]")
+                
+                confusion_note = ""
+                if 0.5 <= confidence <= 0.7:
+                    confusion_note = (
+                        f"\n\nNOTE: The classification confidence was medium ({confidence:.1%}), "
+                        f"so I'm providing information from both domains to ensure completeness."
+                    )
+                
+                domain_context = (
+                    f"This question involves {len(domains_list)} domains: {', '.join(domains_list)}.\n"
+                    f"YOU MUST structure your answer with EXACTLY {len(domains_list)} sections.\n\n"
+                    f"FORMAT YOUR RESPONSE EXACTLY LIKE THIS:\n\n"
+                    + "\n\n\n\n".join(domain_sections) + "\n\n"  # Four newlines between sections
+                    f"\nCRITICAL REQUIREMENTS:\n"
+                    f"- Each section MUST start with the ### heading shown above\n"
+                    f"- Include citations [source.docx] for each fact\n"
+                    f"- Add FOUR blank lines between domain sections for clear separation\n"
+                    f"- DO NOT combine domains. DO NOT skip sections. DO NOT mix information.\n"
+                    f"- If no information is available for a domain, state 'No specific information available for this domain.'\n"
+                    f"- End each domain section with a period before starting the next section"
+                    + confusion_note
+                )
+                
+                prompt_variables["domain_context"] = domain_context
+                print(f"✅ Set domain_context for {len(domains_list)} domains (confidence: {confidence:.1%})")
+                print(f"   Context length: {len(domain_context)}")
+                print(f"   Context preview: {domain_context[:200]}...")
+            else:
+                print(f"🔸 Single domain, high confidence - using standard formatting")
         
-        # Also print if sources are tagged
-        sources = prompt_variables.get('text_sources', [])
-        if sources:
-            print(f"  First source preview: {sources[0][:100]}...")
-            domain_tagged = any("[Domain:" in str(s) for s in sources)
-            print(f"  Sources are domain-tagged: {domain_tagged}")
+        # Debug: Print final prompt variables
+        print(f"\n🔧 Final prompt variables:")
+        for key, value in prompt_variables.items():
+            if key in ["domain_prefix", "domain_context", "injected_prompt", "override_prompt"]:
+                if isinstance(value, str):
+                    print(f"   {key}: '{value[:100]}...' (length: {len(value)})")
+                else:
+                    print(f"   {key}: {value}")
+            elif key == "text_sources":
+                print(f"   {key}: {len(value)} sources")
+            else:
+                print(f"   {key}: {type(value).__name__}")
 
+        # Render the prompt
+        print("rendering prompt with variables:")
+        print(prompt_variables["domain_prefix"] if "domain_prefix" in prompt_variables else "No domain prefix")
+        print(prompt_variables["domain_context"] if "domain_context" in prompt_variables else "No domain context")
         messages = self.prompt_manager.render_prompt(
             self.answer_prompt,
             prompt_variables
         )
         
-        # Debug: Print the rendered prompt
-        print(f"🔧 Rendered prompt (first message):")
+        # Debug: Check rendered message
         if messages and len(messages) > 0:
-            print(f"  {messages[0].get('content', '')[:200]}...")
+            system_msg = messages[0].get("content", "")
+            print(f"\n🔍 Rendered system message check:")
+            print(f"   Contains domain_prefix: {'📚 Based on your question' in system_msg}")
+            print(f"   Contains domain_context: {'CRITICAL FORMATTING REQUIREMENT' in system_msg}")
+            print(f"   Contains Under Cosmic: {'Under Cosmic:' in system_msg}")
+            print(f"   System message length: {len(system_msg)}")
+            
+            # Print first 500 chars to see what's actually there
+            print(f"\n📝 System message preview:")
+            print(system_msg[:500])
 
         chat_coroutine = cast(
             Union[Awaitable[ChatCompletion], Awaitable[AsyncStream[ChatCompletionChunk]]],
@@ -225,8 +301,13 @@ class ChatReadRetrieveReadApproach(ChatApproach):
         if domain_info:
             extra_info.thoughts.insert(0, ThoughtStep(
                 title="Domain Classification",
-                data=domain_info,
-                properties={"classifier": "DomainClassifier"}
+                description=domain_info["message"],
+                props={
+                    "domains": domain_info["domains"],
+                    "confidence": domain_info["confidence"],
+                    "reasoning": domain_info["reasoning"],
+                    "classifier": "DomainClassifier"
+                }
             ))
         
         return (extra_info, chat_coroutine)
@@ -252,38 +333,45 @@ class ChatReadRetrieveReadApproach(ChatApproach):
 
         # Determine which index to use and build domain-specific filter
         domain_info = overrides.get("domain_classification")
-        search_index_name = self.search_index_name  # Default
+        search_index_name = self.search_index_name  # Use the dedicated index for this approach
         search_index_filter = base_search_filter  # Start with base filter
         
         if domain_info and domain_info.get("domains"):
             domains = domain_info["domains"]
             if len(domains) == 1:
                 domain = domains[0]
-                # Single domain - use specific index
-                if "Cosmic" in domains:
-                    search_index_name = self.cosmic_index_name
-                    print(f"🎯 Using Cosmic index for search: {search_index_name}")
+                # Add category filter if needed (for mixed-domain indexes)
+                domain_category = overrides.get("include_category")
+                if domain_category:
+                    # Handle both string and list for include_category
+                    if isinstance(domain_category, list):
+                        # Multiple categories specified - add parentheses for proper OData syntax
+                        category_filters = [f"(category eq '{cat}')" for cat in domain_category]
+                        categories_filter = " or ".join(category_filters)
+                        category_filter = f"({categories_filter})"
+                    else:
+                        # Single category specified
+                        category_filter = f"(category eq '{domain_category}')"
                     
-                    # Add category filter if the index contains multiple categories
-                    category_filter = "category eq 'Cosmic'"
                     if base_search_filter:
-                        search_index_filter = f"({base_search_filter}) and ({category_filter})"
+                        search_index_filter = f"({base_search_filter}) and {category_filter}"
                     else:
                         search_index_filter = category_filter
+                    print(f"🎯 Using domain filter for {domain_category}: {category_filter}")
                         
-                elif "Substrate" in domains:
-                    search_index_name = self.substrate_index_name
-                    print(f"🎯 Using Substrate index for search: {search_index_name}")
-                    
-                    # Add category filter if the index contains multiple categories
-                    category_filter = "category eq 'Substrate'"
-                    if base_search_filter:
-                        search_index_filter = f"({base_search_filter}) and ({category_filter})"
-                    else:
-                        search_index_filter = category_filter
             else:
-                # Multiple domains - search with category filter
-                categories_filter = " or ".join([f"category eq '{domain}'" for domain in domains])
+                # Multiple domains - add category filter for all requested domains  
+                domain_category = overrides.get("include_category")
+                if domain_category:
+                    # Use the explicit include_category if provided
+                    if isinstance(domain_category, list):
+                        categories_filter = " or ".join([f"category eq '{cat}'" for cat in domain_category])
+                    else:
+                        categories_filter = f"category eq '{domain_category}'"
+                else:
+                    # Fall back to using the classified domains
+                    categories_filter = " or ".join([f"category eq '{domain}'" for domain in domains])
+                
                 if base_search_filter:
                     search_index_filter = f"({base_search_filter}) and ({categories_filter})"
                 else:
@@ -579,6 +667,20 @@ class ChatReadRetrieveReadApproach(ChatApproach):
                 ),
             ],
         )
+        
+        # Add domain classification as a thought step for agentic retrieval too
+        if domain_info:
+            extra_info.thoughts.insert(0, ThoughtStep(
+                title="Domain Classification",
+                description=domain_info["message"],
+                props={
+                    "domains": domain_info["domains"],
+                    "confidence": domain_info["confidence"],
+                    "reasoning": domain_info["reasoning"],
+                    "classifier": "DomainClassifier"
+                }
+            ))
+        
         return extra_info
 
     def _format_domain_message(self, domains: List[str], confidence: float, reasoning: str) -> str:

@@ -28,4 +28,6 @@ class PromptyManager(PromptManager):
         return json.loads(open(self.PROMPTS_DIRECTORY / path).read())
 
     def render_prompt(self, prompt, data) -> list[ChatCompletionMessageParam]:
-        return prompty.prepare(prompt, data)
+        prompt_to_render =  prompty.prepare(prompt, data)
+        print(f"Rendering prompt after prompty: {prompt_to_render}")
+        return prompt_to_render

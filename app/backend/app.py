@@ -432,6 +432,9 @@ async def setup_clients():
     AZURE_SEARCH_SERVICE = os.environ["AZURE_SEARCH_SERVICE"]
     AZURE_SEARCH_ENDPOINT = f"https://{AZURE_SEARCH_SERVICE}.search.windows.net"
     AZURE_SEARCH_INDEX = os.environ["AZURE_SEARCH_INDEX"]
+    # # Add domain-specific indexes - REMOVE THE EARLY DEFINITIONS
+    # AZURE_SEARCH_COSMIC_INDEX = os.getenv("AZURE_SEARCH_COSMIC_INDEX", AZURE_SEARCH_INDEX)
+    # AZURE_SEARCH_SUBSTRATE_INDEX = os.getenv("AZURE_SEARCH_SUBSTRATE_INDEX", AZURE_SEARCH_INDEX)
     AZURE_SEARCH_AGENT = os.getenv("AZURE_SEARCH_AGENT", "")
     # Shared by all OpenAI deployments
     OPENAI_HOST = os.getenv("OPENAI_HOST", "azure")
@@ -711,28 +714,9 @@ async def setup_clients():
         reasoning_effort=OPENAI_REASONING_EFFORT,
     )
 
-    # ChatReadRetrieveReadApproach is used by /chat for multi-turn conversation
-    current_app.config[CONFIG_CHAT_APPROACH] = ChatReadRetrieveReadApproach(
-        search_client=search_client,
-        search_index_name=AZURE_SEARCH_INDEX,
-        agent_model=AZURE_OPENAI_SEARCHAGENT_MODEL,
-        agent_deployment=AZURE_OPENAI_SEARCHAGENT_DEPLOYMENT,
-        agent_client=agent_client,
-        openai_client=openai_client,
-        auth_helper=auth_helper,
-        chatgpt_model=OPENAI_CHATGPT_MODEL,
-        chatgpt_deployment=AZURE_OPENAI_CHATGPT_DEPLOYMENT,
-        embedding_model=OPENAI_EMB_MODEL,
-        embedding_deployment=AZURE_OPENAI_EMB_DEPLOYMENT,
-        embedding_dimensions=OPENAI_EMB_DIMENSIONS,
-        embedding_field=AZURE_SEARCH_FIELD_NAME_EMBEDDING,
-        sourcepage_field=KB_FIELDS_SOURCEPAGE,
-        content_field=KB_FIELDS_CONTENT,
-        query_language=AZURE_SEARCH_QUERY_LANGUAGE,
-        query_speller=AZURE_SEARCH_QUERY_SPELLER,
-        prompt_manager=prompt_manager,
-        reasoning_effort=OPENAI_REASONING_EFFORT,
-    )
+    # Remove this duplicate ChatReadRetrieveReadApproach configuration
+    # since we're using the orchestrator for /chat endpoint now
+    # The orchestrator creates its own domain-specific approaches
 
     if USE_GPT4V:
         current_app.logger.info("USE_GPT4V is true, setting up GPT4V approach")
@@ -824,7 +808,7 @@ async def setup_clients():
         credential=azure_credential
     )
     
-    # Define the embeddings service (this was missing!)
+    # Define the embeddings service
     openai_embeddings_service = setup_embeddings_service(
         azure_credential=azure_credential,
         openai_host=OPENAI_HOST,
@@ -845,7 +829,7 @@ async def setup_clients():
         embeddings_service=openai_embeddings_service,
         chatgpt_deployment=AZURE_OPENAI_CHATGPT_DEPLOYMENT
     )
-    
+
     # Create domain-specific approaches WITHOUT agentic retrieval for now
     cosmic_approach = ChatReadRetrieveReadApproach(
         search_client=cosmic_search_client,
@@ -890,8 +874,8 @@ async def setup_clients():
         prompt_manager=prompt_manager,
         reasoning_effort=OPENAI_REASONING_EFFORT,
     )
-    
-    # Create orchestrator with classifier
+
+    # Create orchestrator with classifier - THIS IS YOUR ORCHESTRATOR LOGIC!
     orchestrator = OrchestratorApproach(
         cosmic_approach=cosmic_approach,
         substrate_approach=substrate_approach,
@@ -899,8 +883,9 @@ async def setup_clients():
         openai_client=openai_client,
         prompt_manager=prompt_manager
     )
-    
-    current_app.config[CONFIG_CHAT_APPROACH] = orchestrator
+
+    # USE THE ORCHESTRATOR INSTEAD OF ChatReadRetrieveReadApproach for /chat
+    current_app.config[CONFIG_CHAT_APPROACH] = orchestrator  # <-- This is the key change!
 
 
 @bp.after_app_serving

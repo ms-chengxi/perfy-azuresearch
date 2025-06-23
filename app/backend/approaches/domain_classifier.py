@@ -109,14 +109,29 @@ class DomainClassifier:
 You need to classify questions into one of these domains:
 
 **COSMIC Domain:**
-- Container platform for performance and diagnostics
-- Keywords: cosmic, container, performance, diagnostics, monitoring, metrics
-- Sample questions: "How do I monitor container performance?", "What are cosmic diagnostics?"
+- Container platform specifically for performance monitoring and diagnostics
+- SPECIFIC indicators: container related performance, memory dumps, EP portal, watson profiling, diagnostics in container context
+- Keywords: cosmic, container 
+- Sample questions: "How do I collect a memory dump from a container?", "How to set up EP triggers?", "What cosmic CLI commands are available?"
 
 **SUBSTRATE Domain:** 
-- Infrastructure platform and cloud services
-- Keywords: substrate, infrastructure, platform, cloud, services, deployment
-- Sample questions: "How to set up substrate infrastructure?", "What is substrate platform?"
+- Infrastructure platform, cloud services, and server management (Exchange, infrastructure deployment)
+- SPECIFIC indicators: Exchange servers, infrastructure setup, server configuration, non-container environments, substrate platform features
+- Keywords: substrate, Exchange, infrastructure, server management, platform deployment, non-container services
+- Sample questions: "How to configure Exchange server?", "How to set up substrate infrastructure?", "What are substrate platform features?"
+
+**IMPORTANT CLASSIFICATION RULES:**
+1. If the question mentions BOTH container/performance AND server/infrastructure aspects → classify as BOTH domains
+2. If the question is about general performance but doesn't specify containers → likely BOTH domains
+3. If the question mentions memory dumps but doesn't specify container context → likely BOTH domains
+4. If unsure between domains → prefer BOTH domains over single domain
+5. Questions about general troubleshooting, performance, or diagnostics without specific context → BOTH domains
+
+**MULTI-DOMAIN INDICATORS:**
+- General performance questions without container-specific context
+- Questions that could apply to both containerized and non-containerized environments
+- Troubleshooting questions that don't specify the environment type
+- Memory dumps, performance monitoring, or diagnostics without clear container vs server context
 
 **Current Question:** "{question}"
 
@@ -126,7 +141,7 @@ Based on the search results from each domain:
 {history_context}
 
 Analyze the question and determine:
-1. Which domain(s) this question belongs to
+1. Which domain(s) this question belongs to - PREFER MULTI-DOMAIN when uncertain
 2. Your confidence level (high/medium/low)  
 3. Brief reasoning
 4. If the domain is confusing/ambiguous, explain what aspects belong to which domain

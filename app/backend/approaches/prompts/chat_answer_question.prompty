@@ -28,18 +28,14 @@ inputs:
         type: string
         default: ""
 sample:
-    user_query: How do I investigate high CPU usage in a Cosmic container?
+    user_query: How do I collect a memory dump?
     include_follow_up_questions: true
-    domain_prefix: "📚 Based on your question, I believe this is related to the **Cosmic** domain."
-    domain_context: ""
-    past_messages:
-        - role: user
-          content: "How do I detect performance issues in Cosmic?"
-        - role: assistant
-          content: "You can start by reviewing the [Windows Perf Counter dashboard](https://cosmicmonitoring-b6a0cza8a4ghfnda.scus.grafana.azure.com/d/f5035b83-bb8d-41ac-808b-65635396a8a1/windows-performance-counter?orgId=1) and [Linux Utilization dashboard](https://cosmicmonitoring-b6a0cza8a4ghfnda.scus.grafana.azure.com/d/rYdddlPWk/linux-utilization?orgId=1) to identify abnormal resource usage. For more detailed steps, refer to the [TSG for perf investigation](https://aka.ms/cosmic/tsg/perf)."
+    domain_prefix: "📚 Based on your question, I believe this is related to multiple domains: **Cosmic** and **Substrate**."
+    domain_context: "YOU MUST structure your answer in 2 sections for the domains: Cosmic, Substrate.\nFORMAT YOUR RESPONSE EXACTLY LIKE THIS:\n\n### Under Cosmic:\n\n[All Cosmic-related information from sources tagged with 'Domain: Cosmic']\n\n### Under Substrate:\n\n[All Substrate-related information from sources tagged with 'Domain: Substrate']\n\nDO NOT mix information from different domains. DO NOT skip domain headings. DO NOT combine domains into one section."
+    past_messages: []
     text_sources:
-        - "[Domain: Cosmic] [Investigate High CPU Utilization in Container.docx](https://microsoft-my.sharepoint-df.com/personal/chengxili_microsoft_com/_layouts/15/Doc.aspx?sourcedoc=%7B795E6E66-25F1-4BE4-8D82-B9324F777E37%7D&file=Investigate%20High%20CPU%20Utilization%20in%20Container.docx&action=default&mobileredirect=true&EntityRepresentationId=8cb99e06-cf21-4a9e-a626-2af05ad16fd2): Examine [Windows Perf Counter dashboard](https://cosmicmonitoring-b6a0cza8a4ghfnda.scus.grafana.azure.com/d/f5035b83-bb8d-41ac-808b-65635396a8a1/windows-performance-counter?orgId=1) and [Linux Utilization dashboard](https://cosmicmonitoring-b6a0cza8a4ghfnda.scus.grafana.azure.com/d/rYdddlPWk/linux-utilization?orgId=1) to detect abnormal usage. For trigger setup, refer to [trigger configuration document](https://eng.ms/docs/products/efficiency-pack/monitoring/triggers/configure-triggers) and [EP portal](https://epportal.azurewebsites.net/trigger?teamName=Cosmic)."
-        - "[Domain: Cosmic] [FAQs for Cosmic Performance.docx](https://microsoft-my.sharepoint-df.com/personal/chengxili_microsoft_com/_layouts/15/Doc.aspx?sourcedoc=%7BE9D8A58B-995F-4FC4-A178-7ABFB8046320%7D&file=FAQs%20for%20Cosmic%20Performance.docx&action=default&mobileredirect=true&EntityRepresentationId=ba6971e7-adf6-44c0-ad26-8d7fda692eeb): For general troubleshooting, see [aka.ms/cosmic911](https://aka.ms/cosmic911) and [Troubleshooting Guide for Performance Investigation](https://aka.ms/cosmic/tsg/perf). For CPR profiling, refer to [Run CPR Analysis with Debug Container](https://eng.ms/docs/experiences-devices/m365-core/substrate-platform/cosmic-group/partners/troubleshooting/debug-tools/run-cpr-analysis-with-debug-container)."
+        - "[Domain: Cosmic] [FAQs for Cosmic Performance.docx]: To collect a memory dump on Cosmic, you can use EP triggers with 'Memory Dump' action via [EP Portal](https://epportal.azurewebsites.net/trigger?teamName=Cosmic) or use Cosmic CLI command `cc debug getdump`."
+        - "[Domain: Substrate] [FAQs for Exchange Performance.docx]: To collect a process memory dump from Exchange server, use: `Request-DumpProcess_V2.ps1 -Target <server> -uniquePid <pid> -processName <name> -full:$true -UseCdb:$true -uploadToWatson:$true`"
 ---
 system:
 {% if override_prompt %}
@@ -53,17 +49,12 @@ Assistant helps Microsoft engineers and partners with performance diagnostics an
 
 Answer ONLY with the facts listed in the list of sources below. If there isn't enough information below, say you don't know. Do not generate answers that don't use the sources below. If asking a clarifying question to the user would help, ask the question.
 
-{% if domain_context %}
-**CRITICAL FORMATTING REQUIREMENT:**
-{{ domain_context }}
-{% endif %}
-
-If the question is not in English, answer in the language used in the question.
-
-Each source has a name followed by a colon and the actual information. Always include the source name for each fact you use in the response. Use square brackets to reference the source, for example [FAQs for Cosmic Performance.docx]. Don't combine sources, list each source separately, for example [FAQs for Cosmic Performance.docx][Investigate High CPU Utilization in Container.docx].
-
 **Always preserve hyperlinks from the sources. Format them using Markdown: [link text](URL). Do not omit or rephrase hyperlinks. If a hyperlink in the source has target="_blank", preserve this attribute by using HTML: <a href="URL" target="_blank">link text</a>.**
 
+{% if domain_context %}
+{{ domain_context }}
+
+{% endif %}
 {{ injected_prompt }}
 {% endif %}
 

@@ -178,7 +178,18 @@ class Approach(ABC):
         security_filter = self.auth_helper.build_security_filters(overrides, auth_claims)
         filters = []
         if include_category:
-            filters.append("category eq '{}'".format(include_category.replace("'", "''")))
+            # Handle both string and list for include_category
+            if isinstance(include_category, list):
+                # Multi-domain: create OR filter for multiple categories
+                category_filters = []
+                for category in include_category:
+                    escaped_category = category.replace("'", "''")
+                    category_filters.append(f"category eq '{escaped_category}'")
+                if category_filters:
+                    filters.append("(" + " or ".join(category_filters) + ")")
+            else:
+                # Single domain: original logic
+                filters.append("category eq '{}'".format(include_category.replace("'", "''")))
         if exclude_category:
             filters.append("category ne '{}'".format(exclude_category.replace("'", "''")))
         if security_filter:
