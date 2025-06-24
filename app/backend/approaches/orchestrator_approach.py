@@ -5,7 +5,7 @@ from typing import Any, Optional
 
 from approaches.chatapproach import ChatApproach
 from approaches.chatreadretrieveread import ChatReadRetrieveReadApproach
-from approaches.approach import ThoughtStep, DataPoints, ExtraInfo  # Add DataPoints, ExtraInfo imports
+from approaches.approach import ThoughtStep, DataPoints, ExtraInfo, Document
 
 
 class OrchestratorApproach(ChatApproach):
@@ -33,39 +33,32 @@ class OrchestratorApproach(ChatApproach):
         # Add missing attributes that ChatApproach expects
         self.include_token_usage = True  # Enable token usage tracking
 
-    def _get_original_filenames_from_sources(self, text_sources: list[str]) -> set[str]:
-        """Extract original filenames from formatted source text by looking for sourcefile patterns"""
-        filenames = set()
-        for source in text_sources:
-            # The source format is typically: "[filename]: content"
-            # We want to extract the filename part before the colon
-            try:
-                # Remove domain tags first
-                clean_source = re.sub(r'\[Domain:\s*\w+\]\s*', '', source)
-                
-                # Look for the citation pattern at the start: [filename.ext]:
-                match = re.match(r'\[([^\]]+\.\w+)\]:', clean_source)
-                if match:
-                    filename = match.group(1)
-                    filenames.add(filename)
-                else:
-                    # Fallback: look for any filename pattern in the source
-                    filename_match = re.search(r'([^\s\[\]]+\.\w+)', clean_source)
-                    if filename_match:
-                        filenames.add(filename_match.group(1))
-            except Exception as e:
-                logging.warning(f"Error extracting filename from source: {e}")
-                continue
-        return filenames
+    def _clean_source(self, source: str, domain: str) -> str:
+        """Remove domain tags from sources to get clean filename: content format"""
+        domain_tag = f"[Domain: {domain}] "
+        if source.startswith(domain_tag):
+            return source[len(domain_tag):]
+        return source
 
     async def _close_unused_coroutine(self, coroutine, name: str):
         """Safely close an unused coroutine to prevent runtime warnings"""
         if coroutine is not None:
             try:
-                print(f"🗑️ Closing unused {name} coroutine")
-                coroutine.close()
+                # Try to cancel first if it's a Task
+                if hasattr(coroutine, 'cancel'):
+                    coroutine.cancel()
+                    try:
+                        await coroutine
+                    except asyncio.CancelledError:
+                        pass  # Expected when cancelling
+                # Then close if it's a generator/coroutine
+                elif hasattr(coroutine, 'close'):
+                    coroutine.close()
+            except (GeneratorExit, RuntimeError, asyncio.CancelledError) as e:
+                # These are expected when closing coroutines
+                logging.debug(f"Expected error closing {name} coroutine: {e}")
             except Exception as e:
-                logging.warning(f"Error closing {name} coroutine: {e}")
+                logging.warning(f"Unexpected error closing {name} coroutine: {e}")
 
     async def run_until_final_call(
         self, messages, overrides, auth_claims, should_stream
@@ -80,27 +73,11 @@ class OrchestratorApproach(ChatApproach):
             # User specified a category, use it directly with domain-specific prompting
             if user_category == "Cosmic":
                 overrides["domain_prefix"] = "📚 Based on your question about Microsoft's Cosmic container platform:"
-                overrides["domain_context"] = """You are an expert on Microsoft's Cosmic container platform for performance and diagnostics.
-
-CRITICAL CITATION REQUIREMENTS:
-- Provide comprehensive factual information from the sources
-- DO NOT include inline citations like [filename.docx] within your response text
-- At the end of your response, add a "## References:" section
-- In the References section, list each source file as [filename.docx] on its own line
-- Extract clean filenames without domain tags or URLs
-- This format ensures citations will be clickable for users"""
+                overrides["domain_context"] = "You are an expert on Microsoft's Cosmic container platform for performance and diagnostics."
                 return await self.cosmic_approach.run_until_final_call(messages, overrides, auth_claims, should_stream)
             elif user_category == "Substrate":
                 overrides["domain_prefix"] = "🏗️ Based on your question about Microsoft's Substrate infrastructure:"
-                overrides["domain_context"] = """You are an expert on Microsoft's Substrate infrastructure platform.
-
-CRITICAL CITATION REQUIREMENTS:
-- Provide comprehensive factual information from the sources
-- DO NOT include inline citations like [filename.docx] within your response text
-- At the end of your response, add a "## References:" section
-- In the References section, list each source file as [filename.docx] on its own line
-- Extract clean filenames without domain tags or URLs
-- This format ensures citations will be clickable for users"""
+                overrides["domain_context"] = "You are an expert on Microsoft's Substrate infrastructure platform."
                 return await self.substrate_approach.run_until_final_call(messages, overrides, auth_claims, should_stream)
         
         # Extract the latest user question
@@ -113,14 +90,14 @@ CRITICAL CITATION REQUIREMENTS:
                 messages[:-1]  # Pass conversation history
             )
             
-            print(f"🎯 Orchestrator Classification Result:")
-            print(f"   Question: {user_question}")
-            print(f"   Domains: {domains}")
-            print(f"   Confidence: {confidence:.1%}")
-            print(f"   Reasoning: {reasoning}")
+            logging.info(f"🎯 Orchestrator Classification Result:")
+            logging.info(f"   Question: {user_question}")
+            logging.info(f"   Domains: {domains}")
+            logging.info(f"   Confidence: {confidence:.1%}")
+            logging.info(f"   Reasoning: {reasoning}")
             
         except Exception as e:
-            print(f"❌ Domain classification error: {e}")
+            logging.error(f"❌ Domain classification error: {e}")
             # Fall back to cosmic domain
             domains = ["Cosmic"]
             confidence = 0.5
@@ -128,33 +105,17 @@ CRITICAL CITATION REQUIREMENTS:
         
         # Handle based on classification results
         if len(domains) == 1 and confidence >= 0.6:
-            # Single domain with high confidence
+            # Single domain with high confidence - no filename extraction needed
             domain = domains[0]
             overrides["include_category"] = domain
             
-            # Add domain-specific prompt context with citation formatting instructions
+            # Add domain-specific prompt context
             if domain == "Cosmic":
                 overrides["domain_prefix"] = f"📚 Based on your question about Microsoft's Cosmic (confidence: {confidence:.1%}):"
-                overrides["domain_context"] = """You are an expert on Microsoft's Cosmic container platform for performance and diagnostics.
-
-CRITICAL CITATION REQUIREMENTS:
-- Provide comprehensive factual information from the sources
-- DO NOT include inline citations like [filename.docx] within your response text
-- At the end of your response, add a "## References:" section
-- In the References section, list each source file as [filename.docx] on its own line
-- Extract clean filenames without domain tags or URLs
-- This format ensures citations will be clickable for users"""
+                overrides["domain_context"] = "You are an expert on Microsoft's Cosmic container platform for performance and diagnostics."
             else:
                 overrides["domain_prefix"] = f"🏗️ Based on your question about Microsoft's Substrate (confidence: {confidence:.1%}):"
-                overrides["domain_context"] = """You are an expert on Microsoft's Substrate infrastructure platform.
-
-CRITICAL CITATION REQUIREMENTS:
-- Provide comprehensive factual information from the sources
-- DO NOT include inline citations like [filename.docx] within your response text
-- At the end of your response, add a "## References:" section
-- In the References section, list each source file as [filename.docx] on its own line
-- Extract clean filenames without domain tags or URLs
-- This format ensures citations will be clickable for users"""
+                overrides["domain_context"] = "You are an expert on Microsoft's Substrate infrastructure platform."
             
             approach = self.cosmic_approach if domain == "Cosmic" else self.substrate_approach
             extra_info, chat_coroutine = await approach.run_until_final_call(messages, overrides, auth_claims, should_stream)
@@ -179,7 +140,7 @@ CRITICAL CITATION REQUIREMENTS:
             
         elif len(domains) >= 2 or (len(domains) == 1 and confidence < 0.6):
             # Multi-domain or low confidence - run both approaches in parallel
-            print(f"🔄 Multi-domain detected, running parallel searches for domains: {domains}")
+            logging.info(f"🔄 Multi-domain detected, running parallel searches for domains: {domains}")
             
             search_domains = domains if len(domains) >= 2 else ["Cosmic", "Substrate"]
             
@@ -201,16 +162,15 @@ CRITICAL CITATION REQUIREMENTS:
             substrate_overrides["domain_context"] = "Focus on Microsoft's Substrate infrastructure platform."
             
             # Run both approaches in parallel with error handling
-            print("🚀 Starting parallel domain searches...")
+            logging.info("🚀 Starting parallel domain searches...")
             try:
                 cosmic_task = self.cosmic_approach.run_until_final_call(messages, cosmic_overrides, auth_claims, individual_should_stream)
                 substrate_task = self.substrate_approach.run_until_final_call(messages, substrate_overrides, auth_claims, individual_should_stream)
                 
                 # Wait for both to complete with timeout and error handling
-                results = await asyncio.gather(
-                    cosmic_task,
-                    substrate_task,
-                    return_exceptions=True  # Don't fail if one search fails
+                results = await asyncio.wait_for(
+                    asyncio.gather(cosmic_task, substrate_task, return_exceptions=True),
+                    timeout=30.0  # 30 second timeout
                 )
                 
                 cosmic_result = results[0]
@@ -220,13 +180,13 @@ CRITICAL CITATION REQUIREMENTS:
                 cosmic_success = not isinstance(cosmic_result, Exception)
                 substrate_success = not isinstance(substrate_result, Exception)
                 
-                print(f"🔍 Search Results:")
-                print(f"   Cosmic success: {cosmic_success}")
-                print(f"   Substrate success: {substrate_success}")
+                logging.info(f"🔍 Search Results:")
+                logging.info(f"   Cosmic success: {cosmic_success}")
+                logging.info(f"   Substrate success: {substrate_success}")
                 
                 if not cosmic_success and not substrate_success:
                     # Both failed - fall back to single domain
-                    print("❌ Both domain searches failed, falling back to cosmic approach")
+                    logging.error("❌ Both domain searches failed, falling back to cosmic approach")
                     overrides["include_category"] = "Cosmic"
                     return await self.cosmic_approach.run_until_final_call(messages, overrides, auth_claims, should_stream)
                 
@@ -235,18 +195,20 @@ CRITICAL CITATION REQUIREMENTS:
                 substrate_extra_info, substrate_chat_coroutine = None, None
                 
                 if not cosmic_success:
-                    print(f"⚠️ Cosmic search failed: {cosmic_result}, using substrate only")
+                    logging.warning(f"⚠️ Cosmic search failed: {cosmic_result}, using substrate only")
                 else:
                     cosmic_extra_info, cosmic_chat_coroutine = cosmic_result
-                    print(f"✅ Cosmic search succeeded with {len(cosmic_extra_info.data_points.text) if cosmic_extra_info and cosmic_extra_info.data_points.text else 0} sources")
+                    sources_count = len(cosmic_extra_info.data_points.text) if cosmic_extra_info and cosmic_extra_info.data_points and cosmic_extra_info.data_points.text else 0
+                    logging.info(f"✅ Cosmic search succeeded with {sources_count} sources")
                     
                 if not substrate_success:
-                    print(f"⚠️ Substrate search failed: {substrate_result}, using cosmic only")
+                    logging.warning(f"⚠️ Substrate search failed: {substrate_result}, using cosmic only")
                 else:
                     substrate_extra_info, substrate_chat_coroutine = substrate_result
-                    print(f"✅ Substrate search succeeded with {len(substrate_extra_info.data_points.text) if substrate_extra_info and substrate_extra_info.data_points.text else 0} sources")
+                    sources_count = len(substrate_extra_info.data_points.text) if substrate_extra_info and substrate_extra_info.data_points and substrate_extra_info.data_points.text else 0
+                    logging.info(f"✅ Substrate search succeeded with {sources_count} sources")
                 
-                print("✅ Parallel searches completed, combining results...")
+                logging.info("✅ Parallel searches completed, combining results...")
                 
                 # For multi-domain, we'll create a unified response, so we need to close
                 # the individual chat coroutines to prevent "never awaited" warnings
@@ -269,12 +231,12 @@ CRITICAL CITATION REQUIREMENTS:
                 return combined_extra_info, combined_chat_coroutine
                 
             except Exception as e:
-                print(f"❌ Multi-domain search failed: {e}, falling back to cosmic approach")
+                logging.error(f"❌ Multi-domain search failed: {e}, falling back to cosmic approach")
                 overrides["include_category"] = "Cosmic"
                 return await self.cosmic_approach.run_until_final_call(messages, overrides, auth_claims, should_stream)
         else:
             # Fallback to cosmic
-            print(f"🔄 Classification unclear, defaulting to Cosmic approach")
+            logging.info(f"🔄 Classification unclear, defaulting to Cosmic approach")
             overrides["include_category"] = "Cosmic"
             overrides["domain_prefix"] = "📚 Based on your question (classification unclear, defaulting to Cosmic):"
             overrides["domain_context"] = "You are an expert on Microsoft's Cosmic container platform."
@@ -289,76 +251,54 @@ CRITICAL CITATION REQUIREMENTS:
     ):
         """Combine results from parallel domain searches into a unified response"""
         
-        # Combine data points (sources/citations)
-        combined_text_sources = []
+        # Prepare clean source lists (NO domain tags) - like vision approach
+        cosmic_sources = []
+        substrate_sources = []
         successful_domains = []
         total_cosmic_sources = 0
         total_substrate_sources = 0
         
-        # Collect original filenames for citation references
-        citation_filenames = set()
-        
-        # Add Cosmic sources with domain tags (if cosmic search succeeded)
-        if cosmic_extra_info and cosmic_extra_info.data_points.text:
+        # Clean cosmic sources (remove domain tags if present)
+        if cosmic_extra_info and cosmic_extra_info.data_points and cosmic_extra_info.data_points.text:
             successful_domains.append("Cosmic")
             total_cosmic_sources = len(cosmic_extra_info.data_points.text)
-            print(f"🌌 Processing {total_cosmic_sources} Cosmic sources")
+            logging.info(f"🌌 Processing {total_cosmic_sources} Cosmic sources")
             for source in cosmic_extra_info.data_points.text:
-                # Keep domain tags in the combined sources for AI processing
-                if not source.startswith("[Domain: Cosmic]"):
-                    tagged_source = f"[Domain: Cosmic] {source}"
-                    combined_text_sources.append(tagged_source)
-                    print(f"   Cosmic source: [Domain: Cosmic] {source[:80]}...")
-                else:
-                    combined_text_sources.append(source)
-                    print(f"   Cosmic source: {source[:80]}...")
-            
-            # Extract original filenames from cosmic sources
-            cosmic_filenames = self._get_original_filenames_from_sources(cosmic_extra_info.data_points.text)
-            citation_filenames.update(cosmic_filenames)
-            print(f"   🌌 Cosmic filenames extracted: {cosmic_filenames}")
+                clean_source = self._clean_source(source, "Cosmic")
+                cosmic_sources.append(clean_source)
+                logging.debug(f"   Cosmic source: {clean_source[:80]}...")
         
-        # Add Substrate sources with domain tags (if substrate search succeeded)
-        if substrate_extra_info and substrate_extra_info.data_points.text:
+        # Clean substrate sources (remove domain tags if present)
+        if substrate_extra_info and substrate_extra_info.data_points and substrate_extra_info.data_points.text:
             successful_domains.append("Substrate")
             total_substrate_sources = len(substrate_extra_info.data_points.text)
-            print(f"🏗️ Processing {total_substrate_sources} Substrate sources")
+            logging.info(f"🏗️ Processing {total_substrate_sources} Substrate sources")
             for i, source in enumerate(substrate_extra_info.data_points.text):
-                # Keep domain tags in the combined sources for AI processing
-                if not source.startswith("[Domain: Substrate]"):
-                    tagged_source = f"[Domain: Substrate] {source}"
-                    combined_text_sources.append(tagged_source)
-                    print(f"   Substrate source [{i+1}]: [Domain: Substrate] {source[:120]}...")
-                else:
-                    combined_text_sources.append(source)
-                    print(f"   Substrate source [{i+1}]: {source[:120]}...")
-            
-            # Extract original filenames from substrate sources
-            substrate_filenames = self._get_original_filenames_from_sources(substrate_extra_info.data_points.text)
-            citation_filenames.update(substrate_filenames)
-            print(f"   🏗️ Substrate filenames extracted: {substrate_filenames}")
-            
-            # Extended debug: Print ALL substrate sources to see what we got
-            print(f"🔍 FULL Substrate sources found ({total_substrate_sources}):")
-            for i, source in enumerate(substrate_extra_info.data_points.text):
-                print(f"   SUBSTRATE [{i+1}] (length: {len(source)}): {source[:200]}...")
-                # Check for key substrate-related terms
-                substrate_terms = ['dump', 'memory', 'process', 'kernel', 'debug', 'powershell', 'exchange', 'watson', 'troubleshoot', 'diagnostic']
-                found_terms = [term for term in substrate_terms if term.lower() in source.lower()]
-                if found_terms:
-                    print(f"      ✅ Contains substrate terms: {found_terms}")
-                else:
-                    print(f"      ⚠️ No obvious substrate terms found")
+                clean_source = self._clean_source(source, "Substrate")
+                substrate_sources.append(clean_source)
+                logging.info(f"   ✅ Substrate source [{i+1}]: {clean_source[:120]}...")
+        else:
+            # DEBUG: Log detailed substrate search results
+            logging.warning(f"❌ Substrate sources missing - Debug info:")
+            logging.warning(f"   substrate_extra_info exists: {substrate_extra_info is not None}")
+            if substrate_extra_info:
+                logging.warning(f"   substrate_extra_info.data_points exists: {substrate_extra_info.data_points is not None}")
+                if substrate_extra_info.data_points:
+                    logging.warning(f"   substrate_extra_info.data_points.text exists: {substrate_extra_info.data_points.text is not None}")
+                    if substrate_extra_info.data_points.text:
+                        logging.warning(f"   substrate_extra_info.data_points.text length: {len(substrate_extra_info.data_points.text)}")
+                        logging.warning(f"   substrate_extra_info.data_points.text content: {substrate_extra_info.data_points.text}")
+            logging.warning(f"   Substrate will NOT be in successful_domains")
         
         # Handle case where substrate search succeeded but found no sources
-        if substrate_extra_info and not substrate_extra_info.data_points.text:
-            print("⚠️ Substrate search succeeded but returned no sources")
+        if substrate_extra_info and substrate_extra_info.data_points and not substrate_extra_info.data_points.text:
+            logging.warning("⚠️ Substrate search succeeded but returned no sources")
         
         # Combine images if any
         combined_images = []
-        if cosmic_extra_info and cosmic_extra_info.data_points.images:
+        if cosmic_extra_info and cosmic_extra_info.data_points and cosmic_extra_info.data_points.images:
             combined_images.extend(cosmic_extra_info.data_points.images)
-        if substrate_extra_info and substrate_extra_info.data_points.images:
+        if substrate_extra_info and substrate_extra_info.data_points and substrate_extra_info.data_points.images:
             combined_images.extend(substrate_extra_info.data_points.images)
         
         # Combine thoughts
@@ -394,6 +334,7 @@ CRITICAL CITATION REQUIREMENTS:
                 )
                 combined_thoughts.append(cosmic_thought)
         
+        # Add substrate thoughts
         if substrate_extra_info and substrate_extra_info.thoughts:
             for thought in substrate_extra_info.thoughts:
                 # Tag thoughts with domain
@@ -404,10 +345,12 @@ CRITICAL CITATION REQUIREMENTS:
                 )
                 combined_thoughts.append(substrate_thought)
         
-        # Create combined extra_info
+        # Create combined extra_info with clean sources for citation validation
+        # Frontend will get clean sources to validate against
+        all_clean_sources = cosmic_sources + substrate_sources
         combined_extra_info = ExtraInfo(
             data_points=DataPoints(
-                text=combined_text_sources,
+                text=all_clean_sources,  # Provide clean sources for citation validation
                 images=combined_images if combined_images else None
             ),
             thoughts=combined_thoughts
@@ -415,7 +358,7 @@ CRITICAL CITATION REQUIREMENTS:
         
         # Handle case where no searches succeeded
         if not successful_domains:
-            print("❌ No successful domain searches, returning empty response")
+            logging.error("❌ No successful domain searches, returning empty response")
             # Create a fallback response
             empty_messages = [{"role": "system", "content": "I apologize, but I encountered errors searching both domains. Please try again or contact support."}]
             fallback_chat_coroutine = self.cosmic_approach.create_chat_completion(
@@ -428,83 +371,41 @@ CRITICAL CITATION REQUIREMENTS:
             )
             return combined_extra_info, fallback_chat_coroutine
         
-        # Now create a unified response using the combined sources
+        # Now create a unified response using the separated clean sources
         # Set up prompt variables for multi-domain formatting
         user_query = messages[-1]["content"]
         base_prompt_vars = self.cosmic_approach.get_system_prompt_variables(overrides.get("prompt_template"))
         
+        # NEW: Use separate source lists instead of combined tagged sources
         prompt_variables = base_prompt_vars | {
             "include_follow_up_questions": bool(overrides.get("suggest_followup_questions")),
             "past_messages": messages[:-1],
             "user_query": user_query,
-            "text_sources": combined_text_sources,
+            "cosmic_sources": cosmic_sources,  # Clean cosmic sources
+            "substrate_sources": substrate_sources,  # Clean substrate sources
+            "text_sources": [],  # Don't use the old combined approach
             "injected_prompt": base_prompt_vars.get("injected_prompt", ""),
             "override_prompt": base_prompt_vars.get("override_prompt", ""),
         }
         
-        # Set improved multi-domain formatting instructions
-        domain_sections = []
-        for domain in successful_domains:
-            if domain == "Cosmic":
-                domain_sections.append(f"""### Cosmic:
-Extract relevant information from {total_cosmic_sources} Cosmic sources tagged '[Domain: Cosmic]'. Focus on Microsoft's Cosmic container platform procedures and tools.""")
-            elif domain == "Substrate":
-                domain_sections.append(f"""### Substrate:
-Extract relevant information from {total_substrate_sources} Substrate sources tagged '[Domain: Substrate]'. Focus on Microsoft's Substrate infrastructure procedures and tools.""")
-            else:
-                domain_sections.append(f"""### {domain}:
-Extract relevant information from {domain} sources.""")
-        
-        # Add note about failed searches if any
-        failed_domains = [d for d in search_domains if d not in successful_domains]
-        failure_note = ""
-        if failed_domains:
-            failure_note = f"\n\nNOTE: Search for {', '.join(failed_domains)} domain(s) encountered errors and results may be incomplete."
-        
-        # Create clean citation list using original filenames (remove duplicates)
-        clean_citations = sorted(list(citation_filenames))
-        citation_list = "\n".join([f"[{filename}]" for filename in clean_citations])
-        
-        print(f"📋 Final clean citation list (original filenames): {clean_citations}")
-        
-        domain_context = f"""You MUST structure your response with {len(successful_domains)} sections followed by a References section:
-
-{chr(10).join(domain_sections)}
-
-## References:
-{citation_list}
-
-MANDATORY FORMATTING REQUIREMENTS:
-- Extract information from ALL sources tagged with domain prefixes
-- DO NOT include inline citations like [filename.docx] within the domain sections
-- You can include clickable hyperlinks to external URLs within sections
-- You MUST end your response with the "## References:" section exactly as shown above
-- The References section is REQUIRED and lists all source documents used
-- Each reference must be in brackets: [filename.docx]
-- Never say "No information available" when sources exist
-
-RESPONSE TEMPLATE:
-### Cosmic:
-[Your Cosmic content here]
-
-### Substrate:  
-[Your Substrate content here]
-
-## References:
-{citation_list}
-
-Follow this template exactly."""
-        
+        # Set domain prefix for multi-domain
         prompt_variables["domain_prefix"] = f"📚 Multi-domain analysis (domains: {', '.join(search_domains)}, confidence: {confidence:.1%}):"
-        prompt_variables["domain_context"] = domain_context
         
-        print(f"🔧 Creating unified response with {len(combined_text_sources)} combined sources")
-        print(f"   Cosmic sources: {total_cosmic_sources}")
-        print(f"   Substrate sources: {total_substrate_sources}")
-        print(f"   Successful domains: {successful_domains}")
-        print(f"   Original filenames for References: {clean_citations}")
+        logging.info(f"🔧 Creating unified response with separate source lists")
+        logging.info(f"   Cosmic sources: {len(cosmic_sources)}")
+        logging.info(f"   Substrate sources: {len(substrate_sources)}")
+        logging.info(f"   Successful domains: {successful_domains}")
         
-        # Render the unified prompt
+        # DEBUG: Log clean sources being sent to AI
+        logging.info(f"🔍 Clean Cosmic sources being sent to AI:")
+        for idx, source in enumerate(cosmic_sources):
+            logging.info(f"   [{idx+1}] {source[:150]}...")
+            
+        logging.info(f"🔍 Clean Substrate sources being sent to AI:")
+        for idx, source in enumerate(substrate_sources):
+            logging.info(f"   [{idx+1}] {source[:150]}...")
+        
+        # Render the unified prompt with separate source lists
         unified_messages = self.prompt_manager.render_prompt(
             self.cosmic_approach.answer_prompt,
             prompt_variables
