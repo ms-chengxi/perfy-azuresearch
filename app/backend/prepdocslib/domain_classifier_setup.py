@@ -101,30 +101,33 @@ class DomainClassifierSetup:
             
         from openai import AsyncAzureOpenAI
         
-        # Get configuration
-        model_deployment = os.environ.get("AZURE_OPENAI_CHATGPT_DEPLOYMENT", "chat")
+        # Try multiple deployment name patterns
+        model_deployment = (
+            os.environ.get("AZURE_OPENAI_GPT4_DEPLOYMENT") or
+            os.environ.get("AZURE_OPENAI_CHATGPT_DEPLOYMENT") or 
+            os.environ.get("AZURE_OPENAI_CHAT_DEPLOYMENT") or
+            "chat"  # fallback
+        )
+        
         endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT", "")
         api_version = os.environ.get("AZURE_OPENAI_API_VERSION") or "2024-06-01"
         
-        print(f"DEBUG: Azure OpenAI Endpoint: {endpoint}")
-        print(f"DEBUG: Model Deployment: {model_deployment}")
-        print(f"DEBUG: API Version: {api_version}")
+        print(f"🔍 Domain Classifier LLM Config:")
+        print(f"   Endpoint: {endpoint}")
+        print(f"   Deployment: {model_deployment}")
+        print(f"   API Version: {api_version}")
         
-        if not endpoint:
-            print("Error: AZURE_OPENAI_ENDPOINT is not set")
-            return None
-        
+        # Test if deployment exists by trying a simple call
         try:
             api_key = os.environ.get("AZURE_OPENAI_API_KEY_OVERRIDE")
             
             if api_key:
-                print("AZURE_OPENAI_API_KEY_OVERRIDE found, using as api_key for Azure OpenAI client")
                 self._llm_client = AsyncAzureOpenAI(
                     api_key=api_key,
                     azure_endpoint=endpoint,
                     api_version=api_version,
-                    max_retries=3,
-                    timeout=60.0
+                    max_retries=2,
+                    timeout=120.0
                 )
                 print("DEBUG: LLM client created with API key")
             else:
@@ -145,15 +148,14 @@ class DomainClassifierSetup:
                     timeout=60.0
                 )
                 print("DEBUG: LLM client created with Managed Identity")
+            return self._llm_client
                 
         except Exception as e:
             print(f"Error creating LLM client: {e}")
             import traceback
             traceback.print_exc()
             return None
-                
-        return self._llm_client
-        
+
     async def extract_domain_characteristics(self, file_paths: List[str], category: str) -> Dict:
         """Extract domain characteristics from documents"""
         all_content = []
@@ -448,7 +450,7 @@ class DomainClassifierSetup:
             return []
         
         # Increased content length for models with larger context windows
-        max_content_length = 90000
+        max_content_length = 10000
         if len(content) > max_content_length:
             content = content[:max_content_length] + "..."
         
@@ -479,7 +481,7 @@ Example output format: ["Azure Kubernetes Service", "container orchestration", "
 """
             
             # Add retry logic for connection issues
-            max_retries = 3
+            max_retries = 1
             for attempt in range(max_retries):
                 try:
                     response = await client.chat.completions.create(
@@ -555,7 +557,7 @@ Example output format: ["Azure Kubernetes Service", "container orchestration", "
             
         # Combine and truncate contents
         combined_content = "\n\n---\n\n".join(contents[:5])
-        max_content_length = 90000
+        max_content_length = 10000
         if len(combined_content) > max_content_length:
             combined_content = combined_content[:max_content_length] + "..."
         
@@ -660,7 +662,7 @@ Example output format: ["How do I configure Watson monitoring for my Cosmic depl
             
         # Combine and truncate contents
         combined_content = "\n\n".join(contents[:8])
-        max_content_length = 90000
+        max_content_length = 10000
         if len(combined_content) > max_content_length:
             combined_content = combined_content[:max_content_length] + "..."
         

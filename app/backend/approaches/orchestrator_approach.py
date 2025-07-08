@@ -66,56 +66,44 @@ class OrchestratorApproach(ChatApproach):
         """
         Override the main logic - route to appropriate domain approach with enhanced prompting
         """
-        # Check if user has explicitly selected a category
-        user_category = overrides.get("include_category", "")
-        
-        if user_category and user_category != "":
-            # User specified a category, use it directly with domain-specific prompting
-            if user_category == "Cosmic":
-                overrides["domain_prefix"] = "📚 Based on your question about Microsoft's Cosmic container platform:"
-                overrides["domain_context"] = "You are an expert on Microsoft's Cosmic container platform for performance and diagnostics."
-                return await self.cosmic_approach.run_until_final_call(messages, overrides, auth_claims, should_stream)
-            elif user_category == "Substrate":
-                overrides["domain_prefix"] = "🏗️ Based on your question about Microsoft's Substrate infrastructure:"
-                overrides["domain_context"] = "You are an expert on Microsoft's Substrate infrastructure platform."
-                return await self.substrate_approach.run_until_final_call(messages, overrides, auth_claims, should_stream)
-        
         # Extract the latest user question
         user_question = messages[-1]["content"] if messages else ""
         
-        # Get domain classification with context
+        # ALWAYS perform domain classification for each question
         try:
             domains, confidence, reasoning = await self.domain_classifier.classify_with_context(
                 user_question,
                 messages[:-1]  # Pass conversation history
             )
             
-            logging.info(f"🎯 Orchestrator Classification Result:")
-            logging.info(f"   Question: {user_question}")
+            logging.info(f"🎯 Domain Classification for: '{user_question}'")
             logging.info(f"   Domains: {domains}")
             logging.info(f"   Confidence: {confidence:.1%}")
             logging.info(f"   Reasoning: {reasoning}")
             
         except Exception as e:
             logging.error(f"❌ Domain classification error: {e}")
-            # Fall back to cosmic domain
-            domains = ["Cosmic"]
+            domains = ["Cosmic, Substrate"]  # Default to both domains
             confidence = 0.5
-            reasoning = f"Classification failed: {str(e)}, defaulting to Cosmic"
-        
-        # Handle based on classification results
+            reasoning = f"Classification failed: {str(e)}, defaulting to both domains"
+
+        # Handle based on fresh classification results
         if len(domains) == 1 and confidence >= 0.6:
-            # Single domain with high confidence - no filename extraction needed
+            # Single domain with high confidence
             domain = domains[0]
+            
+            # Set fresh category for this request only
             overrides["include_category"] = domain
             
             # Add domain-specific prompt context
             if domain == "Cosmic":
-                overrides["domain_prefix"] = f"📚 Based on your question about Microsoft's Cosmic (confidence: {confidence:.1%}):"
-                overrides["domain_context"] = "You are an expert on Microsoft's Cosmic container platform for performance and diagnostics."
+                overrides["domain_prefix"] = f"📚 Cosmic (confidence: {confidence:.1%}):"
+                overrides["domain_context"] = ""  # Keep empty for simplicity
+                overrides["injected_prompt"] = "Be helpful and comprehensive. Always cite sources with [filename]."
             else:
-                overrides["domain_prefix"] = f"🏗️ Based on your question about Microsoft's Substrate (confidence: {confidence:.1%}):"
-                overrides["domain_context"] = "You are an expert on Microsoft's Substrate infrastructure platform."
+                overrides["domain_prefix"] = f"🏗️ Substrate (confidence: {confidence:.1%}):"
+                overrides["domain_context"] = ""  # Keep empty for simplicity  
+                overrides["injected_prompt"] = "Be helpful and comprehensive. Always cite sources with [filename]."
             
             approach = self.cosmic_approach if domain == "Cosmic" else self.substrate_approach
             extra_info, chat_coroutine = await approach.run_until_final_call(messages, overrides, auth_claims, should_stream)
@@ -347,7 +335,7 @@ class OrchestratorApproach(ChatApproach):
         
         # Create combined extra_info with clean sources for citation validation
         # Frontend will get clean sources to validate against
-        all_clean_sources = cosmic_sources + substrate_sources
+        all_clean_sources = cosmic_sources + substrate_sources  # Keep this for frontend citation validation
         combined_extra_info = ExtraInfo(
             data_points=DataPoints(
                 text=all_clean_sources,  # Provide clean sources for citation validation
@@ -370,46 +358,63 @@ class OrchestratorApproach(ChatApproach):
                 should_stream,
             )
             return combined_extra_info, fallback_chat_coroutine
-        
+
         # Now create a unified response using the separated clean sources
         # Set up prompt variables for multi-domain formatting
         user_query = messages[-1]["content"]
         base_prompt_vars = self.cosmic_approach.get_system_prompt_variables(overrides.get("prompt_template"))
         
-        # NEW: Use separate source lists instead of combined tagged sources
+        # FIXED LOGIC: Only pass non-empty source arrays to trigger correct prompt template logic
         prompt_variables = base_prompt_vars | {
             "include_follow_up_questions": bool(overrides.get("suggest_followup_questions")),
             "past_messages": messages[:-1],
             "user_query": user_query,
-            "cosmic_sources": cosmic_sources,  # Clean cosmic sources
-            "substrate_sources": substrate_sources,  # Clean substrate sources
-            "text_sources": [],  # Don't use the old combined approach
-            "injected_prompt": base_prompt_vars.get("injected_prompt", ""),
+            "text_sources": [],  # Don't use generic text_sources for multi-domain
+            "domain_prefix": f"📚 Multi-domain:",
+            "domain_context": "",
+            "injected_prompt": "Be helpful and cite sources with [filename].",
             "override_prompt": base_prompt_vars.get("override_prompt", ""),
         }
         
-        # Set domain prefix for multi-domain
-        prompt_variables["domain_prefix"] = f"📚 Multi-domain analysis (domains: {', '.join(search_domains)}, confidence: {confidence:.1%}):"
+        # CRITICAL FIX: Only add source arrays if they have content
+        # This ensures the prompt template logic works correctly
+        if len(cosmic_sources) > 0:
+            prompt_variables["cosmic_sources"] = cosmic_sources
+        else:
+            prompt_variables["cosmic_sources"] = []  # Explicitly set to empty
+            
+        if len(substrate_sources) > 0:
+            prompt_variables["substrate_sources"] = substrate_sources
+        else:
+            prompt_variables["substrate_sources"] = []  # Explicitly set to empty
         
         logging.info(f"🔧 Creating unified response with separate source lists")
-        logging.info(f"   Cosmic sources: {len(cosmic_sources)}")
-        logging.info(f"   Substrate sources: {len(substrate_sources)}")
+        logging.info(f"   Cosmic sources: {len(cosmic_sources)} (will pass: {len(cosmic_sources) > 0})")
+        logging.info(f"   Substrate sources: {len(substrate_sources)} (will pass: {len(substrate_sources) > 0})")
         logging.info(f"   Successful domains: {successful_domains}")
         
-        # DEBUG: Log clean sources being sent to AI
-        logging.info(f"🔍 Clean Cosmic sources being sent to AI:")
+        # DEBUG: Log clean sources being sent to AI (use debug level)
+        logging.debug(f"🔍 Clean Cosmic sources being sent to AI:")
         for idx, source in enumerate(cosmic_sources):
-            logging.info(f"   [{idx+1}] {source[:150]}...")
+            logging.debug(f"   [{idx+1}] {source[:150]}...")
             
-        logging.info(f"🔍 Clean Substrate sources being sent to AI:")
+        logging.debug(f"🔍 Clean Substrate sources being sent to AI:")
         for idx, source in enumerate(substrate_sources):
-            logging.info(f"   [{idx+1}] {source[:150]}...")
+            logging.debug(f"   [{idx+1}] {source[:150]}...")
+        
+        # Use shared prompt template (both approaches use the same template)
+        shared_prompt_template = self.cosmic_approach.answer_prompt  # Could also use substrate_approach.answer_prompt
         
         # Render the unified prompt with separate source lists
         unified_messages = self.prompt_manager.render_prompt(
-            self.cosmic_approach.answer_prompt,
+            shared_prompt_template,
             prompt_variables
         )
+        
+        # Log the rendered prompt for debugging (first 500 chars of system message)
+        if unified_messages and len(unified_messages) > 0:
+            system_msg = unified_messages[0].get("content", "")
+            logging.info(f"🔍 Rendered prompt preview: {system_msg[:500]}...")
         
         # Create the unified chat completion (with proper streaming support)
         unified_chat_coroutine = self.cosmic_approach.create_chat_completion(
